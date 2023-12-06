@@ -1,0 +1,354 @@
+---
+title: "Uni Frankfurt Zootierbiologie - Mikrobiom"
+author: "Daniel Monteiro"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Exploratory Data Analysis
+
+
+```{r libraries, include=FALSE, echo=FALSE}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(stats)
+library(xlsx)
+library(reshape2)
+library(stargazer)
+```
+
+```{r data wrangling, include=FALSE, echo=FALSE, warning=FALSE}
+import_data <- function() {
+  ### Main data
+  data <- read.xlsx('data/data_family.xlsx',sheetName='family')
+  names(data)[names(data) == "unclassified"] <- "D_unclassified"
+  
+  ### Code family
+  code_family <- read.xlsx('data/data_family.xlsx',sheetName='code')
+  
+  ### Metadata family
+  metadata_family <- read.xlsx('data/data_family.xlsx',sheetName='metadata')
+  #### Habitat is merged from Habitat1 and Habitat2
+  metadata_family$Habitats <- paste(metadata_family$Habitat1, metadata_family$Habitat2, sep = "_")
+  
+  return(list(data = data, code_family = code_family, metadata_family = metadata_family))
+}
+
+identify_non_matching <- function(data_list) {
+  # Get the 'index' values from data_list$data and 'ID' values from data_list$metadata_family
+  index_values <- data_list$data$index
+  ID_values <- data_list$metadata_family$ID
+
+  # Identify 'index' values with no corresponding 'ID'
+  index_no_match <- setdiff(index_values, ID_values)
+
+  # Identify 'ID' values with no corresponding 'index'
+  ID_no_match <- setdiff(ID_values, index_values)
+
+  # Return a list containing 'index' and 'ID' values with no matches
+  list('index_no_match' = index_no_match, 'ID_no_match' = ID_no_match)
+}
+
+remove_less_frequent_art <- function(df, threshold = 20) {
+  # Count the number of rows for each 'Art'
+  art_counts <- table(df$Art)
+
+  # Find the 'Art' categories that have less than the threshold number of rows
+  less_frequent_art <- names(art_counts[art_counts < threshold])
+
+  # Remove rows with 'Art' categories that have less than the threshold number of rows
+  df <- df[!(df$Art %in% less_frequent_art),]
+
+  return(df)
+}
+
+normalize <- function(data_list) {
+  df_meta <- merge(data_list$data, data_list$metadata_family[c('ID','Art','Gattung','Familie','digestion','Diet','Habitats','Habitat1','Habitat2','Region')], by.x='index', by.y='ID')
+  # Remove all species with less than 20 observations
+  df_meta <- remove_less_frequent_art(df_meta)
+  # Transpose bacteria family columns into rows
+  df <- pivot_longer(df_meta, cols = starts_with("D_"), names_to="Family", values_to="amount")
+  # Remove rows with less than 10 reads
+  df <- subset(df, !apply(df < 10, 1, any))
+  df <- merge(df, data_list$code_family, by='Family')
+  
+  # Sum the amount by Family
+  df_sum_Family <- df %>%
+    group_by(index,Familie,Gattung,Art,Family,digestion,Diet,Habitats,Habitat1,Habitat2,Region) %>%
+    summarize(amount_sum = sum(amount)) %>%
+    ungroup()
+  
+  # Calculate the percentage of the total amount by Family
+  df_pct_Family <- df_sum_Family %>%
+    group_by(index,Familie,Gattung,Art,digestion,Diet,Habitats,Habitat1,Habitat2,Region) %>%
+    mutate(pct = amount_sum / sum(amount_sum) * 100) %>%
+    ungroup() %>% 
+    select(-amount_sum)
+  
+  return(df_pct_Family)
+}
+
+drop_small_pct <- function(df, limit=1) {
+  df <- df[df$pct >= limit, ]
+  return(df)
+}
+
+pivot <- function(df) {
+  new_df <- df %>%
+    pivot_wider(names_from = Family, values_from = pct, values_fill = 0)
+  # Get the column indices where all values are 0
+  #zero_cols <- which(sapply(new_df[, 5:ncol(new_df)], function(x) is.numeric(x) && all(x == 0)))
+  # Drop the zero columns
+  #new_df <- new_df[, -zero_cols]
+  new_df$index <- NULL
+  return(new_df)
+}
+```
+
+```{r import data, include=FALSE, echo=FALSE, warning=FALSE}
+data_list <- import_data()
+```
+
+```{r}
+# Checks if there are any missing matches on metadata_family and data
+no_matches <- identify_non_matching(data_list)
+
+# To print the results
+print(no_matches$index_no_match)  # 'index' values with no matching 'ID'
+print(no_matches$ID_no_match)  # 'ID' values with no matching 'index'
+```
+
+
+```{r}
+### Import Data
+df <- normalize(data_list)
+#df <- drop_small_pct(df, limit=10) # All percentages smaller 10% are dropped
+metadata_family <- data_list$metadata_family
+
+print(sort(table(df$Art), descreasing=T))
+```
+
+```{r microbiome compositions, echo=FALSE, warning=FALSE}
+### Plot function
+plot_composition <- function(data, animal, bacteria, legend = "none", title = "") {
+  chart <- ggplot(data = data, aes_string(x = animal, y = "pct", fill = bacteria)) +
+    geom_bar(stat = "identity", position = position_fill()) +
+    coord_flip() +
+    scale_x_discrete(limits = rev(levels(factor(data[[animal]])))) +
+    ggtitle(title) + 
+    theme(legend.position = legend)
+  return(chart)
+}
+
+### Plot composition on Diet level
+plot_composition(df, "Diet", "Family", title="Microbiome composition by diet")
+```
+
+Hypothese: Herbivore lassen sich gut von Carnivoren und Omnivoren unterscheiden. Carnivoren und Omnivoren hingegen lassen sich nicht gut unterscheiden.  
+```{r, echo=FALSE, warning=FALSE}
+### Plot composition on Digestion level
+plot_composition(df, "digestion", "Family", title="Microbiome composition by digestion")
+```
+
+Hypothese: Bei der Verdauung können 'simple' und 'hindgut' gut unterschieden werden, ggf. sogar noch andere.  
+```{r, echo=FALSE, warning=FALSE}
+### Plot composition on merged Habitat level
+plot_composition(df, "Habitats", "Family", title="Microbiome composition by habitats")
+```
+
+Hypothese: Bestimmte Formen von Habitat können gut voneinander unterschieden werden.  
+```{r, echo=FALSE, warning=FALSE}
+### Plot composition on Region level
+plot_composition(df, "Region", "Family",title="Microbiome composition by region")
+```
+
+Hypothese: Es scheint Muster in den unterschiedlichen Regionen zu geben. Es ist aber noch zu klären, ob die nicht auf die Verdauung und Ernährung zurückzuführen sind.  
+Zu klären: Warum gibt es Europ_North_America und Europe+North_America?  
+
+### Herbivore vs. Omni- und Carnivore  
+Um besser zu verstehen, wie sich die Unterschiede zwischen Herbivoren und den anderen Ernährungsformen manifestieren, betrachten wir die Gruppen einzeln.  
+
+#### Verdauung
+```{r, echo=FALSE, warning=FALSE}
+### Plot composition on Digestion level of herbivors
+plot_composition(df[df$Diet == 'herbivor',], "digestion", "Family",title="Microbiome composition by digestion - Herbivore")
+plot_composition(df[df$Diet != 'herbivor',], "digestion", "Family",title="Microbiome composition by digestion - Omnivore & Carnivore")
+```
+
+Hypothese: Selbst nach der Aufteilung zwischen Herbivoren und Omni- und Carnivoren bestehen teils deutliche Unterschiede zwischen den Verdauungsformen, die dafür genutzt werden können Arten voneinander zu unterscheiden.  
+
+#### Habitat  
+```{r, echo=FALSE, warning=FALSE}
+### Plot composition on merged Habitat level
+plot_composition(df[df$Diet == 'herbivor',], "Habitats", "Family",title="Microbiome composition by habitats - Herbivore")
+plot_composition(df[df$Diet != 'herbivor',], "Habitats", "Family",title="Microbiome composition by habitats - Omnivore & Carnivore")
+```
+
+Hypothese: Die Unterschiede in der Zusammenstellung des Mikrobioms in den Habitats sind über alle Ernährungsformen homogener geworden, aber es gibt dennoch einige Unterschiede bei Waldgebieten.  
+
+#### Region
+```{r, echo=FALSE, warning=FALSE}
+### Plot composition on Region level
+plot_composition(df[df$Diet == 'herbivor',], "Region", "Family",title="Microbiome composition by region - Herbivore")
+plot_composition(df[df$Diet != 'herbivor',], "Region", "Family",title="Microbiome composition by region - Omnivore & Carnivore")
+```
+
+Hypothese: Durch die Unterscheidung zwischen Herbivoren und Omni- und Carnivoren gibt deutlichere Unterschiede in den Regionen.  
+
+```{r, echo=FALSE, warning=FALSE}
+### Plot composition on Familie level
+plot_composition(df[df$Diet == 'herbivor',], "Familie", "Family",title="Microbiome composition by family - Herbivore")
+plot_composition(df[df$Diet != 'herbivor',], "Familie", "Family",title="Microbiome composition by family - Omnivore & Carnivore")
+```
+
+Hypothese: Insbesondere bei den Omni- und Carnivoren bestehen große Unterschiede in der Zusammensetzung auf Familienebene.  
+```{r, echo=FALSE, warning=FALSE}
+### Plot composition on Gattung level
+plot_composition(df[df$Diet == 'herbivor',], "Gattung", "Family",title="Microbiome composition by genus - Herbivore")
+plot_composition(df[df$Diet != 'herbivor',], "Gattung", "Family",title="Microbiome composition by genus - Omnivore & Carnivore")
+```
+
+Hypothese: Bei allen Ernährungsformen bestehen gr��ere Unterschiede in der Zusammensetzung auf Gattungsebene.  
+
+```{r, echo=FALSE, warning=FALSE}
+### Plot composition on Art level
+plot_composition(df[df$Diet == 'herbivor',], "Art", "Family")
+plot_composition(df[df$Diet != 'herbivor',], "Art", "Family")
+```
+
+Hypothese: Einige Tierarten können anhand ihres Mikrobioms unterschieden werden (z.B. Löwenaffe, Flusspferd, Waldhund).  
+
+```{r, echo=FALSE, warning=FALSE}
+### Plot composition on Art level
+#plot_composition(df[df$Diet == 'herbivor' & df$digestion == 'foregut',], "Familie", "Family")
+plot_composition(df[df$Diet == 'herbivor' & df$digestion == 'foregut_ruminant',], "Familie", "Family")
+plot_composition(df[df$Diet == 'herbivor' & df$digestion == 'hindgut_colon',], "Familie", "Family")
+plot_composition(df[df$Diet == 'herbivor' & df$digestion == 'simple',], "Familie", "Family")
+```
+
+
+### Korrelation  
+
+```{r, echo=FALSE, warning=FALSE}
+apply_limit <- function(corm, limit=0, drop.rows = FALSE) {
+  # Replace small values with NA
+  corm[abs(corm) < limit] <- NA
+  corm <- corm[rowSums(corm, na.rm = TRUE) != 1, colSums(corm, na.rm = TRUE) != 1]
+  
+  if (drop.rows == TRUE) {
+    corm <- na.omit(corm)
+  }
+  return(corm)
+}
+
+plot_cor <- function(df_cor, df_cor_2, column="", limit = 0, drop.rows = FALSE, title=NULL) {
+  # Compute correlation
+  corm <- cor(df_cor_2, df_cor)
+  corm <- apply_limit(corm, limit = limit, drop.rows = drop.rows)
+
+  # Check if there are enough data points to generate a plot
+  if(is.null(corm) || sum(is.na(corm)) == length(corm)) {
+    stop("Not enough data points for a meaningful plot after applying limit.")
+  }
+
+  # Check for title
+  if (is.null(title)) {
+    title = paste("Correlation matrix of ", column, " and bacteria family\nfor correlation values >", limit)
+  }
+
+  # Plot the correlation matrix using ggplot2
+  chart <- ggplot(data = na.omit(melt(corm)), aes(x = as.character(Var2), y = Var1, fill = value)) +
+    geom_tile() +
+    geom_text(aes(label = sprintf("%.2f", value)), size = 2, na.rm = TRUE) +
+    scale_fill_gradient2(low = "blue", mid = "white", high = "red", na.value = "white") +
+    labs(
+      x = "",
+      y = "",
+      title = title
+    ) +
+    theme_minimal() +
+    theme(panel.grid.major = element_line(color = "black", linetype = "dashed")) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+  return(chart)
+}
+
+plot_cor_OH <- function(df, df2, column, limit = 0, drop.rows = FALSE, title=NULL) {
+  # One-hot encoding
+  df_cor <- model.matrix(~ . - 1, data = df[, column, drop = FALSE])
+  # Plot
+  chart <- plot_cor(df_cor, df2, column, limit = limit, drop.rows = drop.rows, title = title)
+  return(chart)
+}
+
+```
+
+```{r diet correlation, echo=FALSE, warning=FALSE, fig.height=10, fig.width=10}
+df_cor <- pivot(df)
+df_cor_pct <- df_cor[,10:ncol(df_cor)]
+df_cor_pct <- df_cor_pct[, order(names(df_cor_pct))]
+df_cor <- df_cor[,1:9]
+
+plot_cor_OH(df_cor, df_cor_pct, 'Diet', limit=0.3, drop.rows=FALSE)
+```
+
+Hypothese: Die Korrelationen zwischen bestimmten Bakterienfamilien und der Ernährungsform sind teilweise sehr hoch und weisen darauf hin, dass bestimmte Bakterienfamilien nur mit bestimmten Ernährungsformen einhergehen (z.B. das Vorkommen von Fusobacteriaceae spricht dagegen, dass es sich um Herbivore handelt, während Ruminococcaceae dafür sprechen).  
+
+Ansonsten gab es keine erwähnenswerten Korrelationen zwischen Merkmalen und Bakterienfamilien.
+
+```{r bacteria family correlation herbivore, echo=FALSE, warning=FALSE, fig.height=14, fig.width=14}
+df_cor_bact <- pivot(df)
+# Herbivore vs. others
+df_cor_bact_herb <- df_cor_bact[df_cor_bact$Diet == 'herbivor',]
+df_cor_bact_carn <- df_cor_bact[df_cor_bact$Diet == 'carnivor',]
+df_cor_bact_omni <- df_cor_bact[df_cor_bact$Diet == 'omnivor',]
+
+df_cor_bact_herb_pct <- df_cor_bact_herb[,10:ncol(df_cor_bact_herb)]
+df_cor_bact_carn_pct <- df_cor_bact_carn[,10:ncol(df_cor_bact_carn)]
+df_cor_bact_omni_pct <- df_cor_bact_omni[,10:ncol(df_cor_bact_omni)]
+
+df_cor_bact_herb_pct <- df_cor_bact_herb_pct[, order(names(df_cor_bact_herb_pct))]
+df_cor_bact_carn_pct <- df_cor_bact_carn_pct[, order(names(df_cor_bact_carn_pct))]
+df_cor_bact_omni_pct <- df_cor_bact_omni_pct[, order(names(df_cor_bact_omni_pct))]
+
+#plot_cor(df_cor_bact_herb_pct, df_cor_bact_herb_pct, limit = 0.3, title = "Correlation matrix of bacteria families of herbivores\nfor correlation values > 0.3")
+plot_cor(df_cor_bact_herb_pct, df_cor_bact_herb_pct, limit = 0.3, title = "Correlation matrix of bacteria families of herbivores\nfor correlation values > 0.3")
+plot_cor(df_cor_bact_carn_pct, df_cor_bact_carn_pct, limit = 0.3, title = "Correlation matrix of bacteria families of carnivores\nfor correlation values > 0.3")
+plot_cor(df_cor_bact_omni_pct, df_cor_bact_omni_pct, limit = 0.3, title = "Correlation matrix of bacteria families of omnivores\nfor correlation values > 0.3")
+
+```
+
+Hypothese: Bestimmte Bakterienfamilien unter Herbivoren treten oft gemeinsam auf. Darunter sind folgende Paare identifizierbar:  
+  - Carnobacteriaceae und Aerococcaceae  
+  - Sphingobacteriaceae, Weeksellaceae und Flavobacteriaceae  
+  - Veillonellaceae und Succinivibrionaceae  
+
+Hypothese: Eine bestimmte Bakterienfamilien unter Carnivoren/Omnivoren treten oft gemeinsam auf: Wohlfahrtiimonadaceae und Pseudomonadaceae.  
+
+## Regressionsanalyse  
+
+Auf Basis der Erkenntnisse der Korrelationsmatrix für die Ernährungsformen führen wir eine Regressionsanalyse durch, um zu prüfen, ob die mittel bis hoch korrelierten Bakterienfamilien statistisch signifikante Faktoren in der Erklärung, ob es sich bei einer gegegebenen Mikrobiom-Zusammensetzung um einen Herbivoren handelt oder nicht.  
+
+```{r regression diet, echo=FALSE, warning=FALSE}
+df_glm <- cbind(df_cor, df_cor_pct)
+df_glm$Herbivore <- ifelse(df_glm$Diet == 'herbivor',1,0)
+
+glm_diet <- glm(Herbivore ~ D_4__Bacteroidaceae + D_4__Clostridiaceae + D_4__Enterobacteriaceae + D_4__Fusobacteriaceae + D_4__Methanobacteriaceae + D_4__Peptostreptococcaceae +
+                  D_4__Prevotellaceae + D_4__Rikenellaceae + D_4__Ruminococcaceae + D_4__Spirochaetaceae, data = df_glm)
+summary(glm_diet)
+```
+
+Die Regressionsanalyse zeigt, dass D_4__Bacteroidaceae, D_4__Fusobacteriaceae, D_4__Methanobacteriaceae, D_4__Peptostreptococcaceae, D_4__Ruminococcaceae und D_4__Spirochaetaceae statistisch signifikante Faktoren (5% Level) sind, um einen Herbivoren von Omni- und Carnivoren zu unterscheiden.
+
+
+```{r export, echo=FALSE, include=FALSE}
+df_export <- df %>%
+  pivot_wider(names_from = Family, values_from = pct, values_fill = 0)
+write.csv(df_export, 'data/data_clean.csv', row.names = FALSE)
+```
+
